@@ -116,6 +116,7 @@ if __name__ == "__main__":
             [
                 secret.namespace() in options.ignore,
                 secret.get_annotation("cert-manager.io/certificate-name"),
+                secret.get_label("sealedsecrets.bitnami.com/sealed-secrets-key"),
                 any(map(lambda x: secret.namespace().startswith(x), options.ignore)),
             ]
         ):
