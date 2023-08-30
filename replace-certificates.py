@@ -82,16 +82,17 @@ def replace_configmap(configmap, cmkey, cert, new_cert, new_key):
         + f"({new_cert.not_valid_before}-{new_cert.not_valid_after})"
     )
     if not options.dryrun:
-        configmap.model.spec.tls.key = b64encode(
-            new_key.private_bytes(
-                Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        ).decode("utf8")
-        configmap.model.spec.tls.certificate = b64encode(
-            new_cert.public_bytes(Encoding.PEM)
-        ).decode("utf8")
+        try:
+            configmap.model.data[cmkey] = b64encode(
+                new_key.private_bytes(
+                    Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption(),
+                )
+            ).decode("utf8")
+        except Exception:
+            logging.error(f"configMap key {cmkey} not existing, cannot replace")
+            return
         oc.replace(configmap)
     else:
         logging.debug("skipping replace due to dry-run mode")
