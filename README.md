@@ -114,3 +114,17 @@ INFO:root:replacing quay secret/cluster-cluster3-replication CN=streaming_replic
 INFO:root:replacing quay secret/cluster-cluster3-server CN=cluster-cluster3-rw (expire 2023-09-26 19:09:44) with CN=*.cluster3.example.com (2023-07-01 14:41:20-2023-09-29 14:41:19)
 INFO:root:replacing quay secret/quay-ssl-postgres CN=quay (expire 2023-10-12 12:37:47) with CN=*.cluster3.example.com (2023-07-01 14:41:20-2023-09-29 14:41:19)
 ```
+
+### Reporting on expire date only
+
+without specifying `cert` and `key` and instead setting `--warn` to a value in days (eq `--warn 30` for 30 days from today) the script will report Certificates which have less valid days left than set in the warn option.
+
+```
+$ ./replace-certificates.py -A --warn 30
+INFO:root:istio-system/secret/istio-ingressgateway-certs <Name(CN=*.apps.example.com)> expires in 30 days, 7:23:47.992904
+INFO:root:openshift-config-managed/secret/kube-controller-manager-client-cert-key <Name(CN=system:kube-controller-manager)> expires in 17 days, 20:48:32.992904
+INFO:root:openshift-config-managed/secret/kube-scheduler-client-cert-key <Name(CN=system:kube-scheduler)> expires in 17 days, 20:48:36.992904
+INFO:root:openshift-gitops/secret/openshift-gitops-tls <Name(CN=gitops.apps.example.com)> expires in 30 days, 7:23:47.992904
+...
+```
+
