@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 import openshift as oc
+import openshift.context
 from base64 import b64decode, b64encode
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
@@ -393,7 +394,7 @@ if __name__ == "__main__":
         oc.use_config_context(options.context)
     if not options.all:
         logging.debug(f"using namespace {options.namespace}")
-        oc.project(options.namespace)
+        oc.set_default_project(options.namespace)
     else:
         logging.debug(f"using all namespaces")
 
