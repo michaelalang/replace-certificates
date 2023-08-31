@@ -19,85 +19,82 @@ now = datetime.now()
 
 def get_cert_object(data):
     logging.debug(f"loading certificate")
-    cert = x509.load_pem_x509_certificate(b64decode(data), default_backend())
+    try:    cert = x509.load_pem_x509_certificate(b64decode(data), default_backend())
+    except TypeError:
+        cert = x509.load_pem_x509_certificate(data, default_backend())
     return cert
 
+def __replace__(secret):
+    if not options.dryrun:
+        oc.replace(secret)
+    else:
+        logging.debug("skipping replace due to dry-run mode")
 
-def replace_secret(secret, cert, new_cert, new_key):
-    if any([new_cert == None, new_key == None]):
+def __delete__(secret):
+    logging.info(
+        f"deleting {secret.namespace()} {secret.qname()} due to already expired"
+    )
+    if not options.dryrun:
+        oc.delete(secret)
+    else:
+        logging.debug("skipping replace due to dry-run mode")
+
+def __update__(secret, scert, skey, cert, new_cert, new_key):
+    if any([new_cert == None]):
         logging.debug("skipping due to no new cert specified")
-        return
+        return secret
     logging.info(
         f"replacing {secret.namespace()} {secret.qname()} {cert.subject.rfc4514_string()}"
         + f" (expire {cert.not_valid_after}) with {new_cert.subject.rfc4514_string()} "
         + f"({new_cert.not_valid_before}-{new_cert.not_valid_after})"
     )
-    if not options.dryrun:
-        secret.model["data"]["tls.key"] = b64encode(
-            new_key.private_bytes(
-                Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        ).decode("utf8")
-        secret.model["data"]["tls.crt"] = b64encode(
-            new_cert.public_bytes(Encoding.PEM)
-        ).decode("utf8")
-        oc.replace(secret)
-    else:
-        logging.debug("skipping replace due to dry-run mode")
-
-
-def replace_route(route, cert, new_cert, new_key):
-    if any([new_cert == None, new_key == None]):
-        logging.debug("skipping due to no new cert specified")
-        return
-    logging.info(
-        f"replacing {route.namespace()} {route.qname()} {cert.subject.rfc4514_string()}"
-        + f" (expire {cert.not_valid_after}) with {new_cert.subject.rfc4514_string()} "
-        + f"({new_cert.not_valid_before}-{new_cert.not_valid_after})"
-    )
-    if not options.dryrun:
-        route.model.spec.tls.key = b64encode(
-            new_key.private_bytes(
-                Encoding.PEM,
-                format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        ).decode("utf8")
-        route.model.spec.tls.certificate = b64encode(
-            new_cert.public_bytes(Encoding.PEM)
-        ).decode("utf8")
-        oc.replace(route)
-    else:
-        logging.debug("skipping replace due to dry-run mode")
-
-
-def replace_configmap(configmap, cmkey, cert, new_cert, new_key):
-    if any([new_cert == None, new_key == None]):
-        logging.debug("skipping due to no new cert specified")
-        return
-    logging.debug(
-        f"replacing {configmap.namespace()} {configmap.qname()} {cert.subject.rfc4514_string()}"
-        + f" (expire {cert.not_valid_after}) with {new_cert.subject.rfc4514_string()} "
-        + f"({new_cert.not_valid_before}-{new_cert.not_valid_after})"
-    )
-    if not options.dryrun:
-        try:
-            configmap.model.data[cmkey] = b64encode(
+    if not new_key == None:
+        secret.model.data[skey] = b64encode(
                 new_key.private_bytes(
                     Encoding.PEM,
                     format=serialization.PrivateFormat.PKCS8,
                     encryption_algorithm=serialization.NoEncryption(),
                 )
             ).decode("utf8")
-        except Exception:
-            logging.error(f"configMap key {cmkey} not existing, cannot replace")
-            return
-        oc.replace(configmap)
-    else:
-        logging.debug("skipping replace due to dry-run mode")
+    secret.model.data[scert] = b64encode(
+                new_cert.public_bytes(Encoding.PEM)
+    ).decode("utf8")
+    return secret
 
+
+def replace_secret(secret, scert, skey, cert, new_cert, new_key):
+    try:
+        if not options.cleanup:
+            secret = __update__(secret, scert, skey, cert, new_cert, new_key)
+            __replace__(secret)
+        else:
+            if (cert.not_valid_after - now).total_seconds() < 0:
+                __delete__(secret)
+    except Exception as secreterr:
+        logging.error(f"cannot replace secret {secret.namespace()}/{secret.qname()}" + \
+                      f" on key {skey}: {secreterr}")
+
+def replace_route(route, scert, skey, cert, new_cert, new_key):
+    try:
+        if not options.cleanup:
+            __update__(route, scert, skey, cert, new_cert, new_key)
+        else:
+            if (cert.not_valid_after - now).total_seconds() < 0:
+                __delete__(route)
+    except Exception as routeerr:
+        logging.error(f"cannot replace route {route.namespace()}/{route.qname()}" + \
+                      f" on key {skey}: {routeerr}")
+
+def replace_configmap(configmap, scert, skey, cert, new_cert, new_key):
+    try:
+        if not options.cleanup:
+            __update__(configmap, scert, skey, cert, new_cert, new_key)
+        else:
+            if (cert.not_valid_after - now).total_seconds() < 0:
+                __delete__(configmap)
+    except Exception as configmaperr:
+        logging.error(f"cannot replace configmap {configmap.namespace()}/{configmap.qname()}" + \
+                      f" on key {scert}: {configmaperr}")
 
 def do_secrets():
     logging.debug("API query for secrets, type 'kubernetes.io/tls'")
@@ -120,7 +117,7 @@ def do_secrets():
             continue
         try:
             logging.debug(f"decoding Certificate {secret.namespace()}/{secret.qname()}")
-            cert = get_cert_object(secret.model["data"]["tls.crt"])
+            cert = get_cert_object(secret.model.data['tls.crt'])
             if options.warn > 0:
                 if (cert.not_valid_after - now).days <= options.warn:
                     logging.info(
@@ -133,7 +130,7 @@ def do_secrets():
             continue
         if options.subject == "*":
             logging.debug("matching Certificate subject '*'")
-            replace_secret(secret, cert, new_cert, new_key)
+            replace_secret(secret, 'tls.crt', 'tls.key', cert, new_cert, new_key)
         elif options.subject is None:
             try:
                 altnames = list(
@@ -149,12 +146,13 @@ def do_secrets():
                     logging.debug(
                         f"matching Certificate due to subject or subjectAlternativeNames {cert.subject.rfc4514_string()}"
                     )
-                    replace_secret(secret, cert, new_cert, new_key)
+                    replace_secret(secret, 'tls.crt', 'tls.key', cert, new_cert, new_key)
             except Exception:
                 pass
         elif f"CN={options.subject}" == cert.subject.rfc4514_string():
             logging.debug(f"matching exact subject CN={options.subject}")
-            replace_secret(secret, cert, new_cert, new_key)
+            logging.debug(f"calling replace {secret} {cert}")
+            replace_secret(secret, 'tls.crt', 'tls.key', cert, new_cert, new_key)
 
 
 def do_routes():
@@ -203,7 +201,7 @@ def do_routes():
             continue
         if options.subject == "*":
             logging.debug("matching Certificate subject '*'")
-            replace_route(route, cert, new_cert, new_key)
+            replace_route(route, 'tls.certificate', 'tls.key', cert, new_cert, new_key)
         elif options.subject is None:
             try:
                 altnames = list(
@@ -219,12 +217,12 @@ def do_routes():
                     logging.debug(
                         f"matching Certificate due to subject or subjectAlternativeNames {cert.subject.rfc4514_string()}"
                     )
-                    replace_route(route, cert, new_cert, new_key)
+                    replace_route(route, 'tls.certificate', 'tls.key', cert, new_cert, new_key)
             except Exception:
                 pass
         elif f"CN={options.subject}" == cert.subject.rfc4514_string():
             logging.debug(f"matching exact subject CN={options.subject}")
-            replace_route(route, cert, new_cert, new_key)
+            replace_route(route, 'tls.certificate', 'tls.key', cert, new_cert, new_key)
 
 
 def do_configMaps():
@@ -274,7 +272,7 @@ def do_configMaps():
                         )
                 if options.subject == "*":
                     logging.debug("matching Certificate subject '*'")
-                    replace_configmap(configmap, cmkey, cert, new_cert, new_key)
+                    replace_configmap(configmap, cmkey, None, cert, new_cert, new_key)
                 elif options.subject is None:
                     try:
                         altnames = list(
@@ -290,12 +288,12 @@ def do_configMaps():
                             logging.debug(
                                 f"matching Certificate due to subject or subjectAlternativeNames {cert.subject.rfc4514_string()}"
                             )
-                            replace_configmap(configmap, cmkey, cert, new_cert, new_key)
+                            replace_configmap(configmap, cmkey, None, cert, new_cert, new_key)
                     except Exception:
                         pass
                 elif f"CN={options.subject}" == cert.subject.rfc4514_string():
                     logging.debug(f"matching exact subject CN={options.subject}")
-                    replace_configmap(configmap, cmkey, cert, new_cert, new_key)
+                    replace_configmap(configmap, cmkey, None, cert, new_cert, new_key)
         except ValueError:
             logging.error(
                 f"cannot load cert for {configmap.namespace()} {configmap.qname()} skipping"
@@ -314,6 +312,7 @@ if __name__ == "__main__":
     parser.add_option("--context", action="store", default=None)
     parser.add_option("-n", "--namespace", action="store", default="default")
     parser.add_option("-w", "--warn", type=int, default=0)
+    parser.add_option("--cleanup", action="store_true", default=False)
     parser.add_option(
         "--yes-I-really-really-mean-it",
         dest="safety",
@@ -347,19 +346,20 @@ if __name__ == "__main__":
         logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
     if all(
-        [options.all, options.subject == "*", not options.safety, options.warn == 0]
+        [options.all, options.subject == "*", not options.safety, options.warn == 0, not options.cleanup]
     ):
         print(f"you specified to replace all subjects in all namespaces")
         print(f"this would render your cluster useless")
         print(f"please privde --yes-I-really-really-mean-it accordingly")
         sys.exit(1)
-    if all([options.all, options.subject == "*", options.safety, options.warn == 0]):
+    if all([options.all, options.subject == "*", options.safety, options.warn == 0, not options.cleanup]):
         print(f"still I cannot fulfill your request")
         sys.exit(1)
 
     NEWCERT = options.cert
     NEWKEY = options.key
-    if options.warn == 0:
+    if all([options.warn == 0,
+            not options.cleanup]):
         if any([NEWCERT is None, NEWKEY is None]):
             logging.error("you need to specify --cert and --key")
             parser.print_help()
