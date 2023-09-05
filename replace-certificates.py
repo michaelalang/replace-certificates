@@ -197,7 +197,7 @@ def do_secrets():
         elif f"CN={options.subject}" == cert.subject.rfc4514_string():
             logging.debug(f"matching exact subject CN={options.subject}")
             logging.debug(f"calling replace {secret} {cert}")
-            replace_secret(secret, "tls.crt", "tls.key", cert, new_certs, new_key)
+            replace_secret(secret, "tls.crt", "tls.key", certs, new_certs, new_key)
 
 
 def do_routes():
