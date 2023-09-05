@@ -19,14 +19,35 @@ now = datetime.now()
 
 def get_cert_object(data):
     logging.debug(f"loading certificate")
-    try:
-        cert = x509.load_pem_x509_certificate(b64decode(data), default_backend())
-    except TypeError:
-        cert = x509.load_pem_x509_certificate(data, default_backend())
-    return cert
+    certs = []
+    if isinstance(data, bytes):
+        logging.debug('b64decode certificate data')
+        data = b64decode(data)
+    for cert in data.split('-----BEGIN CERTIFICATE-----')[1:]:
+        try:
+            logging.debug('doing new cert')
+            cert = x509.load_pem_x509_certificate(('-----BEGIN CERTIFICATE-----' + cert).encode('utf8'),
+                                                 default_backend())
+            logging.debug(f"adding new cert {cert}")
+            certs.append(cert)
+        except Exception as certerr:
+            logging.error(f"cannot load certificate {certerr}")
+    return certs
 
+def get_server_cert(certs):
+    for cert in certs:
+        logging.debug(f"checking none CA cert {cert}")
+        try:
+            list(filter(lambda y: y.value.ca == False,
+                    (filter(lambda x: x.oid == x509.OID_BASIC_CONSTRAINTS, cert.extensions))))[0]
+            return cert
+        except IndexError:  continue
+    raise Exception(f"couldnt find a none CA certificate in the list({len(certs)})")
 
 def __replace__(secret):
+    logging.info(
+        f"replacing {secret.namespace()} {secret.qname()}"
+    )
     if not options.dryrun:
         oc.replace(secret)
     else:
@@ -43,12 +64,14 @@ def __delete__(secret):
         logging.debug("skipping replace due to dry-run mode")
 
 
-def __update__(secret, scert, skey, cert, new_cert, new_key):
-    if any([new_cert == None]):
+def __update__(secret, scert, skey, certs, new_certs, new_key):
+    if any([new_certs == []]):
         logging.debug("skipping due to no new cert specified")
         return secret
+    new_cert = get_server_cert(new_certs)
+    cert = get_server_cert(certs)
     logging.info(
-        f"replacing {secret.namespace()} {secret.qname()} {cert.subject.rfc4514_string()}"
+        f"updating {secret.namespace()} {secret.qname()} {cert.subject.rfc4514_string()}"
         + f" (expire {cert.not_valid_after}) with {new_cert.subject.rfc4514_string()} "
         + f"({new_cert.not_valid_before}-{new_cert.not_valid_after})"
     )
@@ -60,18 +83,21 @@ def __update__(secret, scert, skey, cert, new_cert, new_key):
                 encryption_algorithm=serialization.NoEncryption(),
             )
         ).decode("utf8")
-    secret.model.data[scert] = b64encode(new_cert.public_bytes(Encoding.PEM)).decode(
+    new_data = b64encode(''.join(list(
+        map(lambda x: x.public_bytes(Encoding.PEM).decode('utf8'), new_certs))).encode('utf8'))
+    secret.model.data[scert] = new_data.decode(
         "utf8"
     )
     return secret
 
 
-def replace_secret(secret, scert, skey, cert, new_cert, new_key):
+def replace_secret(secret, scert, skey, certs, new_certs, new_key):
     try:
         if not options.cleanup:
-            secret = __update__(secret, scert, skey, cert, new_cert, new_key)
+            secret = __update__(secret, scert, skey, certs, new_certs, new_key)
             __replace__(secret)
         else:
+            cert = get_server_cert(certs)
             if (cert.not_valid_after - now).total_seconds() < 0:
                 __delete__(secret)
     except Exception as secreterr:
@@ -81,11 +107,12 @@ def replace_secret(secret, scert, skey, cert, new_cert, new_key):
         )
 
 
-def replace_route(route, scert, skey, cert, new_cert, new_key):
+def replace_route(route, scert, skey, certs, new_certs, new_key):
     try:
         if not options.cleanup:
-            __update__(route, scert, skey, cert, new_cert, new_key)
+            __update__(route, scert, skey, certs, new_certs, new_key)
         else:
+            cert = get_server_cert(certs)
             if (cert.not_valid_after - now).total_seconds() < 0:
                 __delete__(route)
     except Exception as routeerr:
@@ -95,11 +122,12 @@ def replace_route(route, scert, skey, cert, new_cert, new_key):
         )
 
 
-def replace_configmap(configmap, scert, skey, cert, new_cert, new_key):
+def replace_configmap(configmap, scert, skey, certs, new_certs, new_key):
     try:
         if not options.cleanup:
-            __update__(configmap, scert, skey, cert, new_cert, new_key)
+            __update__(configmap, scert, skey, certs, new_certs, new_key)
         else:
+            cert = get_server_cert(certs)
             if (cert.not_valid_after - now).total_seconds() < 0:
                 __delete__(configmap)
     except Exception as configmaperr:
@@ -130,7 +158,8 @@ def do_secrets():
             continue
         try:
             logging.debug(f"decoding Certificate {secret.namespace()}/{secret.qname()}")
-            cert = get_cert_object(secret.model.data["tls.crt"])
+            certs = get_cert_object(b64decode(secret.model.data["tls.crt"]).decode('utf8'))
+            cert = get_server_cert(certs)
             if options.warn > 0:
                 if (cert.not_valid_after - now).days <= options.warn:
                     logging.info(
@@ -143,8 +172,9 @@ def do_secrets():
             continue
         if options.subject == "*":
             logging.debug("matching Certificate subject '*'")
-            replace_secret(secret, "tls.crt", "tls.key", cert, new_cert, new_key)
+            replace_secret(secret, "tls.crt", "tls.key", certs, new_certs, new_key)
         elif options.subject is None:
+            new_cert = get_server_cert(certs)
             try:
                 altnames = list(
                     map(
@@ -160,14 +190,14 @@ def do_secrets():
                         f"matching Certificate due to subject or subjectAlternativeNames {cert.subject.rfc4514_string()}"
                     )
                     replace_secret(
-                        secret, "tls.crt", "tls.key", cert, new_cert, new_key
+                        secret, "tls.crt", "tls.key", cert, new_certs, new_key
                     )
             except Exception:
                 pass
         elif f"CN={options.subject}" == cert.subject.rfc4514_string():
             logging.debug(f"matching exact subject CN={options.subject}")
             logging.debug(f"calling replace {secret} {cert}")
-            replace_secret(secret, "tls.crt", "tls.key", cert, new_cert, new_key)
+            replace_secret(secret, "tls.crt", "tls.key", cert, new_certs, new_key)
 
 
 def do_routes():
@@ -201,9 +231,10 @@ def do_routes():
                     f"skipping route {route.namespace()}/{route.qname()} no certificate in spec"
                 )
                 continue
-            cert = get_cert_object(
-                b64encode(route.model.spec.tls.certificate.encode("utf8"))
+            certs = get_cert_object(
+                route.model.spec.tls.certificate.encode("utf8")
             )
+            cert  = get_server_cert(certs)
             if options.warn > 0:
                 if (cert.not_valid_after - now).days <= options.warn:
                     logging.info(
@@ -216,7 +247,7 @@ def do_routes():
             continue
         if options.subject == "*":
             logging.debug("matching Certificate subject '*'")
-            replace_route(route, "tls.certificate", "tls.key", cert, new_cert, new_key)
+            replace_route(route, "tls.certificate", "tls.key", certs, new_certs, new_key)
         elif options.subject is None:
             try:
                 altnames = list(
@@ -254,7 +285,6 @@ def do_configMaps():
             oc.selector("configMaps", all_namespaces=options.all).objects(),
         )
     )
-
     for configmap in configmaps:
         if any(
             [
@@ -276,12 +306,13 @@ def do_configMaps():
             )
             for cmkey in configmap.model.data.keys():
                 try:
-                    cert = get_cert_object(
-                        b64encode(configmap.model.data[cmkey].encode("utf8"))
+                    certs = get_cert_object(
+                        configmap.model.data[cmkey].encode("utf8")
                     )
+                    cert = get_server_cert(certs)
                 except Exception as certerr:
                     # ignore none parseable certificates
-                    pass
+                    continue
                 if options.warn > 0:
                     if (cert.not_valid_after - now).days <= options.warn:
                         logging.info(
@@ -289,7 +320,7 @@ def do_configMaps():
                         )
                 if options.subject == "*":
                     logging.debug("matching Certificate subject '*'")
-                    replace_configmap(configmap, cmkey, None, cert, new_cert, new_key)
+                    replace_configmap(configmap, cmkey, None, certs, new_certs, new_key)
                 elif options.subject is None:
                     try:
                         altnames = list(
@@ -329,6 +360,7 @@ if __name__ == "__main__":
     parser.add_option("-i", "--ignore", action="append", default=[])
     parser.add_option("-s", "--subject", action="store", default=None)
     parser.add_option("--context", action="store", default=None)
+    parser.add_option("--chain", action="append", default=[])
     parser.add_option("-n", "--namespace", action="store", default="default")
     parser.add_option("-w", "--warn", type=int, default=0)
     parser.add_option("--cleanup", action="store_true", default=False)
@@ -401,9 +433,7 @@ if __name__ == "__main__":
             logging.error(f"unable to open Certificate {NEWCERT}, no such file")
             sys.exit(1)
         try:
-            new_cert = x509.load_pem_x509_certificate(
-                open(NEWCERT).read().encode("utf8")
-            )
+            new_certs = get_cert_object(open(NEWCERT).read())
         except Exception as certerr:
             logging.error(f"unable to load Certificate {NEWCERT} {certerr}")
             sys.exit(1)
@@ -418,7 +448,7 @@ if __name__ == "__main__":
             logging.error(f"unable to load private key {NEWKEY} {certerr}")
             sys.exit(1)
     else:
-        new_cert = None
+        new_certs = None
         new_key = None
 
     if not options.context is None:
