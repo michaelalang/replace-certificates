@@ -49,7 +49,7 @@ def __replace__(secret):
         f"replacing {secret.namespace()} {secret.qname()}"
     )
     if not options.dryrun:
-        print(oc.replace(secret))
+        oc.replace(secret)
     else:
         logging.debug("skipping replace due to dry-run mode")
 
