@@ -17,15 +17,16 @@ import optparse
 now = datetime.now()
 
 
-def get_cert_object(data):
+def get_cert_object(data, decode=True):
     logging.debug(f"loading certificate")
     certs = []
-    if isinstance(data, bytes):
+    if all([decode, isinstance(data, bytes)]):
         logging.debug('b64decode certificate data')
         data = b64decode(data)
     for cert in data.split('-----BEGIN CERTIFICATE-----')[1:]:
         try:
             logging.debug('doing new cert')
+            logging.debug(f"{cert}")
             cert = x509.load_pem_x509_certificate(('-----BEGIN CERTIFICATE-----' + cert).encode('utf8'),
                                                  default_backend())
             logging.debug(f"adding new cert {cert}")
@@ -70,6 +71,7 @@ def __update__(secret, scert, skey, certs, new_certs, new_key):
         return secret
     new_cert = get_server_cert(new_certs)
     cert = get_server_cert(certs)
+    
     logging.info(
         f"updating {secret.namespace()} {secret.qname()} {cert.subject.rfc4514_string()}"
         + f" (expire {cert.not_valid_after}) with {new_cert.subject.rfc4514_string()} "
@@ -94,23 +96,23 @@ def __update__(secret, scert, skey, certs, new_certs, new_key):
 def replace_secret(secret, scert, skey, certs, new_certs, new_key):
     try:
         if not options.cleanup:
-            secret = __update__(secret, scert, skey, certs, new_certs, new_key)
+            secret = __update__(secret, scert, skey, [certs], new_certs, new_key)
             __replace__(secret)
         else:
-            cert = get_server_cert(certs)
+            cert = get_server_cert([certs])
             if (cert.not_valid_after - now).total_seconds() < 0:
                 __delete__(secret)
     except Exception as secreterr:
         logging.error(
             f"cannot replace secret {secret.namespace()}/{secret.qname()}"
-            + f" on key {skey}: {secreterr}"
-        )
+           + f" on key {skey}: {secreterr}"
+       )
 
 
 def replace_route(route, scert, skey, certs, new_certs, new_key):
     try:
         if not options.cleanup:
-            __update__(route, scert, skey, certs, new_certs, new_key)
+            __update__(route, scert, skey, [certs], new_certs, new_key)
         else:
             cert = get_server_cert(certs)
             if (cert.not_valid_after - now).total_seconds() < 0:
@@ -159,7 +161,8 @@ def do_secrets():
         try:
             logging.debug(f"decoding Certificate {secret.namespace()}/{secret.qname()}")
             certs = get_cert_object(b64decode(secret.model.data["tls.crt"]).decode('utf8'))
-            cert = get_server_cert(certs)
+            try:    cert = get_server_cert(certs)
+            except: continue
             if options.warn > 0:
                 if (cert.not_valid_after - now).days <= options.warn:
                     logging.info(
@@ -171,10 +174,10 @@ def do_secrets():
             )
             continue
         if options.subject == "*":
-            logging.debug("matching Certificate subject '*'")
+            logging.info("matching Certificate subject '*'")
             replace_secret(secret, "tls.crt", "tls.key", certs, new_certs, new_key)
         elif options.subject is None:
-            new_cert = get_server_cert(certs)
+            new_cert = get_server_cert(new_certs)
             try:
                 altnames = list(
                     map(
@@ -186,9 +189,12 @@ def do_secrets():
                 )
                 altnames.append(f"CN={new_cert.subject.rfc4514_string()}")
                 if cert.subject.rfc4514_string() in altnames:
-                    logging.debug(
+                    logging.info(f"object {secret.namespace()}/{secret.qname()}")
+                    logging.info(
                         f"matching Certificate due to subject or subjectAlternativeNames {cert.subject.rfc4514_string()}"
                     )
+                    logging.info(f"cert subject = {cert.subject.rfc4514_string()} {altnames}")
+                    #logging.info(f"altNames = {altnames}")
                     replace_secret(
                         secret, "tls.crt", "tls.key", cert, new_certs, new_key
                     )
@@ -232,7 +238,7 @@ def do_routes():
                 )
                 continue
             certs = get_cert_object(
-                route.model.spec.tls.certificate.encode("utf8")
+                route.model.spec.tls.certificate, decode=False
             )
             cert  = get_server_cert(certs)
             if options.warn > 0:
